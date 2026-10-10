@@ -1,8 +1,32 @@
+
+/**
+ * YourTube Email Service
+ * Subscription confirmation and login OTP emails.
+ * Login OTP uses Resend HTTPS API instead of SMTP.
+ */
+
 import nodemailer from "nodemailer";
 
 /**
- * Send Subscription Confirmation & Invoice Email
- * Gracefully logs if SMTP credentials are not configured in test environments.
+ * Escape user-provided values before inserting them into HTML.
+ */
+function escapeEmailHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+
+    return entities[char];
+  });
+}
+
+/**
+ * Send Subscription Confirmation & Invoice Email.
+ * Existing SMTP behavior is preserved.
  */
 export async function sendSubscriptionConfirmationEmail({
   toEmail,
@@ -19,90 +43,95 @@ export async function sendSubscriptionConfirmationEmail({
   expiryDate,
   nextRenewalDate,
 }) {
-  const formattedAmount = `${currency === "INR" ? "₹" : currency} ${amount.toLocaleString()}`;
-  const formattedStart = new Date(startDate).toLocaleDateString("en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-  const formattedExpiry = new Date(expiryDate).toLocaleDateString("en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  const formattedAmount = `${currency === "INR" ? "₹" : currency} ${Number(amount).toLocaleString("en-IN")}`;
+
+  const formatDate = (date) =>
+    new Date(date).toLocaleDateString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+
+  const formattedStart = formatDate(startDate);
+  const formattedExpiry = formatDate(expiryDate);
   const formattedRenewal = nextRenewalDate
-    ? new Date(nextRenewalDate).toLocaleDateString("en-IN", {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-      })
+    ? formatDate(nextRenewalDate)
     : "N/A";
 
   const emailSubject = `YourTube ${subscriptionPlan} Subscription Confirmation (Invoice ${invoiceNumber})`;
 
   const emailHtml = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <h1 style="color: #dc2626; margin: 0; font-size: 28px; font-weight: 800;">YourTube</h1>
-        <p style="color: #6b7280; margin: 4px 0 0 0; font-size: 14px;">Payment Receipt & Subscription Confirmation</p>
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;background:#fff;">
+      <div style="text-align:center;margin-bottom:24px;">
+        <h1 style="color:#dc2626;margin:0;font-size:28px;">YourTube</h1>
+        <p style="color:#6b7280;font-size:14px;">Payment Receipt &amp; Subscription Confirmation</p>
       </div>
 
-      <div style="background-color: #f9fafb; border-radius: 8px; padding: 18px; margin-bottom: 24px;">
-        <h2 style="margin: 0 0 8px 0; color: #111827; font-size: 18px;">Hello ${userName || "Valued Subscriber"},</h2>
-        <p style="margin: 0; color: #4b5563; font-size: 14px; line-height: 1.5;">
-          Thank you for subscribing to <strong>YourTube ${subscriptionPlan}</strong>! Your payment has been successfully processed and verified.
+      <div style="background:#f9fafb;border-radius:8px;padding:18px;margin-bottom:24px;">
+        <h2 style="color:#111827;font-size:18px;">
+          Hello ${escapeEmailHtml(userName || "Valued Subscriber")},
+        </h2>
+        <p style="color:#4b5563;font-size:14px;line-height:1.5;">
+          Thank you for subscribing to
+          <strong>YourTube ${escapeEmailHtml(subscriptionPlan)}</strong>!
+          Your payment has been successfully processed and verified.
         </p>
       </div>
 
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px;">
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
         <tbody>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Invoice Number:</td>
-            <td style="padding: 10px 0; text-align: right; font-weight: 600; color: #111827;">${invoiceNumber}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Subscription Plan:</td>
-            <td style="padding: 10px 0; text-align: right; font-weight: 600; color: #dc2626;">${subscriptionPlan}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Billing Cycle:</td>
-            <td style="padding: 10px 0; text-align: right; font-weight: 600; color: #111827;">${billingCycle}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Amount Paid:</td>
-            <td style="padding: 10px 0; text-align: right; font-weight: 700; color: #059669; font-size: 16px;">${formattedAmount}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Payment Date:</td>
-            <td style="padding: 10px 0; text-align: right; color: #111827;">${new Date(paymentDate).toLocaleString("en-IN")}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Razorpay Payment ID:</td>
-            <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #374151;">${razorpayPaymentId || transactionId}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Active From:</td>
-            <td style="padding: 10px 0; text-align: right; color: #111827;">${formattedStart}</td>
-          </tr>
-          <tr style="border-bottom: 1px solid #f3f4f6;">
-            <td style="padding: 10px 0; color: #6b7280;">Valid Until:</td>
-            <td style="padding: 10px 0; text-align: right; font-weight: 600; color: #111827;">${formattedExpiry}</td>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Invoice Number:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(invoiceNumber)}</td>
           </tr>
           <tr>
-            <td style="padding: 10px 0; color: #6b7280;">Next Renewal Date:</td>
-            <td style="padding: 10px 0; text-align: right; color: #111827;">${formattedRenewal}</td>
+            <td style="padding:10px 0;color:#6b7280;">Subscription Plan:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(subscriptionPlan)}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Billing Cycle:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(billingCycle)}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Amount Paid:</td>
+            <td style="padding:10px 0;text-align:right;font-weight:bold;color:#059669;">
+              ${escapeEmailHtml(formattedAmount)}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Payment Date:</td>
+            <td style="padding:10px 0;text-align:right;">
+              ${escapeEmailHtml(new Date(paymentDate).toLocaleString("en-IN"))}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Razorpay Payment ID:</td>
+            <td style="padding:10px 0;text-align:right;">
+              ${escapeEmailHtml(razorpayPaymentId || transactionId)}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Active From:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(formattedStart)}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Valid Until:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(formattedExpiry)}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0;color:#6b7280;">Next Renewal Date:</td>
+            <td style="padding:10px 0;text-align:right;">${escapeEmailHtml(formattedRenewal)}</td>
           </tr>
         </tbody>
       </table>
 
-      <div style="border-top: 1px solid #e5e7eb; padding-top: 16px; text-align: center; color: #9ca3af; font-size: 12px;">
-        <p style="margin: 0 0 6px 0;">Need assistance? Contact support at <strong>support@yourtube.com</strong></p>
-        <p style="margin: 0;">This is an automated transaction receipt for YourTube Test Razorpay Payments.</p>
+      <div style="border-top:1px solid #e5e7eb;padding-top:16px;text-align:center;color:#9ca3af;font-size:12px;">
+        <p>Need assistance? Contact support at support@yourtube.com</p>
+        <p>This is an automated receipt for YourTube test Razorpay payments.</p>
       </div>
     </div>
   `;
 
-  // Check if SMTP is configured
   const smtpHost = process.env.SMTP_HOST;
   const smtpPort = process.env.SMTP_PORT;
   const smtpUser = process.env.SMTP_USER;
@@ -110,10 +139,12 @@ export async function sendSubscriptionConfirmationEmail({
 
   if (smtpHost && smtpUser && smtpPass) {
     try {
+      const port = Number(smtpPort || 587);
+
       const transporter = nodemailer.createTransport({
         host: smtpHost,
-        port: parseInt(smtpPort || "587", 10),
-        secure: smtpPort === "465",
+        port,
+        secure: port === 465,
         auth: {
           user: smtpUser,
           pass: smtpPass,
@@ -121,29 +152,44 @@ export async function sendSubscriptionConfirmationEmail({
       });
 
       const info = await transporter.sendMail({
-        from: process.env.EMAIL_FROM || `"YourTube" <billing@yourtube.com>`,
+        from: process.env.EMAIL_FROM || `"YourTube" <${smtpUser}>`,
         to: toEmail,
         subject: emailSubject,
         html: emailHtml,
       });
 
-      console.log(`[Email] Subscription confirmation email sent to ${toEmail}: ${info.messageId}`);
+      console.log(
+        `[Email] Subscription confirmation sent. Message ID: ${info.messageId}`
+      );
+
       return { sent: true, messageId: info.messageId };
     } catch (err) {
-      console.warn(`[Email] Failed to send email via SMTP to ${toEmail}:`, err.message);
+      console.error(
+        "[Email] Subscription confirmation failed:",
+        err.message
+      );
+
       return { sent: false, error: err.message };
     }
-  } else {
-    // Graceful audit logging in test mode
-    console.log(`[Email Service - Test/Dev Mode] Simulated confirmation email for ${toEmail}:`);
-    console.log(`  Subject: ${emailSubject}`);
-    console.log(`  Plan: ${subscriptionPlan} | Invoice: ${invoiceNumber} | Amount: ${formattedAmount}`);
-    return { sent: true, simulated: true };
   }
+
+  // Preserve the existing development/test behavior.
+  console.log(
+    `[Email Service - Test/Dev Mode] Simulated confirmation email for ${toEmail}`
+  );
+  console.log(`Subject: ${emailSubject}`);
+  console.log(
+    `Plan: ${subscriptionPlan} | Invoice: ${invoiceNumber} | Amount: ${formattedAmount}`
+  );
+
+  return { sent: true, simulated: true };
 }
 
 /**
- * Send Security Login OTP Verification Email
+ * Send Security Login OTP Email using Resend HTTPS API.
+ * Required environment variables:
+ * RESEND_API_KEY
+ * EMAIL_FROM (a sender/domain verified in Resend)
  */
 export async function sendLoginOtpEmail({
   toEmail,
@@ -156,88 +202,103 @@ export async function sendLoginOtpEmail({
   location = "Unknown Location",
   expiryMinutes = 10,
 }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+
+  if (!apiKey || !from) {
+    const error =
+      "Email service is not configured: RESEND_API_KEY or EMAIL_FROM is missing.";
+
+    console.error(`[Email] Cannot send login OTP: ${error}`);
+
+    return { sent: false, error };
+  }
+
   const emailSubject = `YourTube Security Verification Code: ${otpCode}`;
 
   const emailHtml = `
-    <div style="font-family: Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
-      <div style="text-align: center; margin-bottom: 20px;">
-        <h1 style="color: #dc2626; margin: 0; font-size: 26px; font-weight: 800;">YourTube Security</h1>
-        <p style="color: #4b5563; margin: 4px 0 0 0; font-size: 14px;">New Login Environment Verification</p>
+    <div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;background:#fff;">
+      <div style="text-align:center;margin-bottom:20px;">
+        <h1 style="color:#dc2626;margin:0;font-size:26px;">YourTube Security</h1>
+        <p style="color:#4b5563;font-size:14px;">New Login Environment Verification</p>
       </div>
 
-      <div style="background-color: #f9fafb; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
-        <h2 style="margin: 0 0 8px 0; color: #111827; font-size: 16px;">Hello ${userName || "User"},</h2>
-        <p style="margin: 0; color: #4b5563; font-size: 13px; line-height: 1.5;">
-          We noticed a sign-in attempt to your YourTube account from an unrecognized device, browser, or location. Please use the verification code below to authorize this login.
+      <div style="background:#f9fafb;border-radius:8px;padding:16px;margin-bottom:20px;">
+        <h2 style="color:#111827;font-size:16px;">
+          Hello ${escapeEmailHtml(userName || "User")},
+        </h2>
+        <p style="color:#4b5563;font-size:13px;line-height:1.5;">
+          We noticed a sign-in attempt from an unrecognized device, browser,
+          or location. Use the verification code below to authorize this login.
         </p>
       </div>
 
-      <div style="text-align: center; margin: 28px 0; padding: 18px; background-color: #fef2f2; border: 1px dashed #f87171; border-radius: 10px;">
-        <div style="font-size: 12px; font-weight: 600; color: #991b1b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;">Your Verification Code</div>
-        <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #dc2626; font-family: monospace;">${otpCode}</div>
-        <div style="font-size: 12px; color: #6b7280; margin-top: 6px;">Valid for ${expiryMinutes} minutes. Single use only.</div>
+      <div style="text-align:center;margin:28px 0;padding:18px;background:#fef2f2;border:1px dashed #f87171;border-radius:10px;">
+        <div style="font-size:12px;font-weight:600;color:#991b1b;margin-bottom:6px;">
+          YOUR VERIFICATION CODE
+        </div>
+        <div style="font-size:32px;font-weight:800;letter-spacing:6px;color:#dc2626;font-family:monospace;">
+          ${escapeEmailHtml(otpCode)}
+        </div>
+        <div style="font-size:12px;color:#6b7280;margin-top:6px;">
+          Valid for ${Number(expiryMinutes)} minutes. Single use only.
+        </div>
       </div>
 
-      <div style="background-color: #f3f4f6; border-radius: 8px; padding: 14px; margin-bottom: 20px; font-size: 12px; color: #374151;">
-        <div style="font-weight: 700; margin-bottom: 6px; color: #111827;">Login Details:</div>
-        <div style="margin-bottom: 3px;"><strong>Browser:</strong> ${browser}</div>
-        <div style="margin-bottom: 3px;"><strong>Operating System:</strong> ${os} (${deviceType})</div>
-        <div style="margin-bottom: 3px;"><strong>Location:</strong> ${location}</div>
-        <div style="margin-bottom: 3px;"><strong>IP Address:</strong> ${ipAddress}</div>
-        <div><strong>Time:</strong> ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST</div>
+      <div style="background:#f3f4f6;border-radius:8px;padding:14px;margin-bottom:20px;font-size:12px;color:#374151;">
+        <div style="font-weight:700;margin-bottom:6px;color:#111827;">Login Details:</div>
+        <div><strong>Browser:</strong> ${escapeEmailHtml(browser)}</div>
+        <div><strong>Operating System:</strong> ${escapeEmailHtml(os)} (${escapeEmailHtml(deviceType)})</div>
+        <div><strong>Location:</strong> ${escapeEmailHtml(location)}</div>
+        <div><strong>IP Address:</strong> ${escapeEmailHtml(ipAddress)}</div>
+        <div><strong>Time:</strong> ${new Date().toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        })} IST</div>
       </div>
 
-      <div style="border-top: 1px solid #e5e7eb; padding-top: 14px; text-align: center; color: #9ca3af; font-size: 11px;">
-        <p style="margin: 0 0 4px 0;">If you did not initiate this sign-in attempt, please change your password and revoke untrusted devices immediately.</p>
-        <p style="margin: 0;">This is an automated security message from YourTube Security System.</p>
+      <div style="border-top:1px solid #e5e7eb;padding-top:14px;text-align:center;color:#9ca3af;font-size:11px;">
+        <p>If you did not initiate this sign-in attempt, change your password and review your account security.</p>
+        <p>This is an automated YourTube Security message.</p>
       </div>
     </div>
   `;
 
-  const smtpHost = process.env.SMTP_HOST;
-  const smtpPort = process.env.SMTP_PORT;
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-
-  const smtpConfig = { SMTP_HOST: smtpHost, SMTP_USER: smtpUser, SMTP_PASS: smtpPass };
-  const missingConfig = Object.entries(smtpConfig)
-    .filter(([, value]) =>
-      !value || /^(your[_@-]|replace_with|example|placeholder)/i.test(value.trim())
-    )
-    .map(([name]) => name);
-
-  if (missingConfig.length > 0) {
-    const error = `SMTP is not configured: ${missingConfig.join(", ")}`;
-    console.error(`[Email] Cannot send login OTP to ${toEmail}: ${error}`);
-    return { sent: false, error };
-  }
-
-  const port = Number(smtpPort || 587);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    const error = "SMTP_PORT must be a valid port number";
-    console.error(`[Email] Cannot send login OTP to ${toEmail}: ${error}`);
-    return { sent: false, error };
-  }
-
   try {
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port,
-      secure: port === 465,
-      auth: { user: smtpUser, pass: smtpPass },
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [toEmail],
+        subject: emailSubject,
+        html: emailHtml,
+      }),
     });
 
-    const info = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || `"YourTube Security" <${smtpUser}>`,
-      to: toEmail,
-      subject: emailSubject,
-      html: emailHtml,
-    });
+    const result = await response.json();
 
-    console.log(`[Email] Login OTP sent to ${toEmail}: ${info.messageId}`);
-    return { sent: true, messageId: info.messageId };
+    if (!response.ok) {
+      const error =
+        result?.message ||
+        result?.name ||
+        `Resend API error (${response.status})`;
+
+      console.error(`[Email] Resend failed to send login OTP: ${error}`);
+
+      return { sent: false, error };
+    }
+
+    console.log(
+      `[Email] Login OTP accepted by Resend. Email ID: ${result.id}`
+    );
+
+    return { sent: true, messageId: result.id };
   } catch (err) {
-    console.warn(`[Email] Failed to send OTP to ${toEmail}:`, err.message);
+    console.error("[Email] Resend request failed:", err.message);
+
     return { sent: false, error: err.message };
   }
 }
