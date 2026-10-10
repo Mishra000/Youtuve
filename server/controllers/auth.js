@@ -24,8 +24,7 @@ const DEV_SKIP_LOGIN_OTP =
   process.env.NODE_ENV === "development" &&
   process.env.DEV_SKIP_LOGIN_OTP === "true";
 const OTP_EMAIL_FAILURE_MESSAGE =
-  "We couldn't send the verification code. Configure SMTP_HOST, SMTP_USER, and a Gmail App Password in the backend environment, then try again.";
-
+  "We couldn't send the verification code. Please check the email service configuration and try again.";
 /**
  * Helper to mask email for privacy (e.g. "m***r@gmail.com")
  */
