@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import users from "../Modals/Auth.js";
 import {
   LoginAttempt,
@@ -15,6 +16,7 @@ import {
 } from "../utils/deviceDetector.js";
 import { sendLoginOtpEmail } from "../utils/emailService.js";
 import { getAuthUserFromRequest } from "../middleware/subscriptionAuth.js";
+import { verifyGoogleOrFirebaseToken } from "../utils/googleAuth.js";
 
 // Configuration defaults with environment variable overrides
 const LOGIN_OTP_EXPIRY_MINUTES = parseInt(process.env.LOGIN_OTP_EXPIRY_MINUTES || "10", 10);
@@ -36,15 +38,55 @@ function maskEmail(email) {
 }
 
 /**
+ * Helper to generate JWT token for authenticated users
+ */
+function generateAuthToken(user) {
+  return jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.JWT_SECRET || "yourtube_jwt_secret_fallback_key",
+    { expiresIn: "30d" }
+  );
+}
+
+/**
  * POST /auth/login
  * Main login endpoint with:
+ *  - Cryptographic Google / Firebase OAuth token verification
+ *  - Secure session establishment without redundant OTP for Google users
  *  - IST-based adaptive theme selection (05:00-12:00 Light, 12:00-05:00 Dark)
  *  - Environment collection (IP, Browser, OS, Device type & model, approximate location)
  *  - First-time user auto-trust (backward compatibility)
- *  - Suspicious / new environment detection (new browser, device, IP, city/state) -> OTP requirement
+ *  - Suspicious / new environment detection (new browser, device, IP, city/state) -> OTP requirement for password/manual logins
  */
 export const login = async (req, res) => {
-  const { email, name, image, deviceIdentifier } = req.body;
+  const {
+    idToken,
+    googleToken,
+    email: rawEmail,
+    name: rawName,
+    image: rawImage,
+    deviceIdentifier,
+  } = req.body;
+
+  let email = rawEmail?.trim();
+  let name = rawName?.trim();
+  let image = rawImage;
+  let isGoogleAuth = false;
+
+  // 1. If Google or Firebase idToken is provided, verify cryptographically with Google
+  const incomingToken = idToken || googleToken;
+  if (incomingToken) {
+    const verified = await verifyGoogleOrFirebaseToken(incomingToken);
+    if (!verified.valid || !verified.email) {
+      return res.status(401).json({
+        message: "Google verification failed: " + (verified.error || "Invalid token"),
+      });
+    }
+    email = verified.email;
+    name = verified.name || name;
+    image = verified.image || image;
+    isGoogleAuth = true;
+  }
 
   if (!email) {
     return res.status(400).json({ message: "Email is required." });
@@ -63,10 +105,19 @@ export const login = async (req, res) => {
     if (!user) {
       user = await users.create({
         email,
-        name,
-        image,
+        name: name || "YourTube User",
+        image: image || "https://github.com/shadcn.png",
         themePreference: "auto",
       });
+    } else if (isGoogleAuth) {
+      // Update profile picture if existing is default shadcn placeholder
+      if (image && (!user.image || user.image.includes("shadcn.png"))) {
+        user.image = image;
+      }
+      if (name && (!user.name || user.name === "User")) {
+        user.name = name;
+      }
+      await user.save();
     }
 
     // 3. Compute IST-based automatic theme
@@ -79,6 +130,81 @@ export const login = async (req, res) => {
     // Update lastLoginTheme
     user.lastLoginTheme = autoTheme;
     await user.save();
+
+    // 4. Issue JWT token
+    const token = generateAuthToken(user);
+
+    // ── CASE GOOGLE AUTH: Secure Google OAuth Session Establishment (No OTP needed) ──
+    // As Google has already securely authenticated the user, establish the session directly
+    if (isGoogleAuth) {
+      const assignedDeviceId =
+        deviceIdentifier || crypto.randomBytes(24).toString("hex");
+
+      const existingDevice = await TrustedDevice.findOne({
+        userId: user._id,
+        deviceIdentifier: assignedDeviceId,
+        isRevoked: false,
+      });
+
+      if (existingDevice) {
+        existingDevice.lastUsedAt = new Date();
+        existingDevice.ipAddress = ipAddress;
+        existingDevice.expiresAt = new Date(Date.now() + TRUSTED_DEVICE_DAYS * 86400000);
+        await existingDevice.save();
+      } else {
+        await TrustedDevice.create({
+          userId: user._id,
+          deviceIdentifier: assignedDeviceId,
+          deviceName: `${uaData.browserName} on ${uaData.operatingSystem}`,
+          browserName: uaData.browserName,
+          browserVersion: uaData.browserVersion,
+          operatingSystem: uaData.operatingSystem,
+          deviceType: uaData.deviceType,
+          deviceModel: uaData.deviceModel,
+          ipAddress,
+          city: location.city,
+          state: location.state,
+          country: location.country,
+          expiresAt: new Date(Date.now() + TRUSTED_DEVICE_DAYS * 86400000),
+        });
+      }
+
+      await LoginAttempt.create({
+        userId: user._id,
+        ipAddress,
+        browserName: uaData.browserName,
+        browserVersion: uaData.browserVersion,
+        operatingSystem: uaData.operatingSystem,
+        deviceType: uaData.deviceType,
+        deviceModel: uaData.deviceModel,
+        city: location.city,
+        state: location.state,
+        country: location.country,
+        approxLatitude: location.approxLatitude,
+        approxLongitude: location.approxLongitude,
+        status: "SUCCESS",
+      });
+
+      await SecurityEvent.create({
+        userId: user._id,
+        eventType: "SUCCESSFUL_LOGIN",
+        description: `Google OAuth login verified: ${uaData.browserName} on ${uaData.operatingSystem}`,
+        ipAddress,
+        browser: uaData.browserName,
+        os: uaData.operatingSystem,
+        location: `${location.city}, ${location.state}`,
+      });
+
+      return res.status(200).json({
+        success: true,
+        result: user,
+        token,
+        theme: effectiveTheme,
+        autoTheme,
+        deviceIdentifier: assignedDeviceId,
+        isTrusted: true,
+      });
+    }
 
     // 4. Check user's previous login attempts to ensure backward compatibility
     const previousAttemptsCount = await LoginAttempt.countDocuments({
@@ -136,6 +262,7 @@ export const login = async (req, res) => {
 
       return res.status(200).json({
         result: user,
+        token,
         theme: effectiveTheme,
         autoTheme,
         deviceIdentifier: newDeviceId,
@@ -202,6 +329,7 @@ export const login = async (req, res) => {
 
       return res.status(200).json({
         result: user,
+        token,
         theme: effectiveTheme,
         autoTheme,
         deviceIdentifier: matchedTrustedDevice.deviceIdentifier,
@@ -256,6 +384,7 @@ export const login = async (req, res) => {
 
       return res.status(200).json({
         result: user,
+        token,
         theme: effectiveTheme,
         autoTheme,
         deviceIdentifier: devDeviceId,
@@ -473,9 +602,12 @@ export const verifyLoginOtp = async (req, res) => {
       description: "Successful OTP verification. Login completed.",
     });
 
+    const token = generateAuthToken(user);
+
     return res.status(200).json({
       success: true,
       result: user,
+      token,
       theme: effectiveTheme,
       autoTheme,
       deviceIdentifier: assignedDeviceId,

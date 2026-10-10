@@ -1,11 +1,8 @@
-
 /**
  * YourTube Email Service
- * Subscription confirmation and login OTP emails.
- * Login OTP uses Resend HTTPS API instead of SMTP.
+ * Uses the Resend HTTPS API for reliable transactional email delivery on Render.
+ * Outbound SMTP (ports 25, 465, 587) is completely avoided.
  */
-
-import nodemailer from "nodemailer";
 
 /**
  * Escape user-provided values before inserting them into HTML.
@@ -19,14 +16,84 @@ function escapeEmailHtml(value) {
       '"': "&quot;",
       "'": "&#39;",
     };
-
     return entities[char];
   });
 }
 
 /**
- * Send Subscription Confirmation & Invoice Email.
- * Existing SMTP behavior is preserved.
+ * Resolve a valid sender address for Resend.
+ * Resend rejects unverified sender domains like @gmail.com or @yahoo.com.
+ * When an unverified or public mailbox domain is detected, we safely fallback
+ * to Resend's default verified sandbox domain: onboarding@resend.dev.
+ */
+export function getEmailSender(prefix = "YourTube") {
+  const configuredFrom = process.env.EMAIL_FROM?.trim();
+
+  if (!configuredFrom) {
+    return `${prefix} <onboarding@resend.dev>`;
+  }
+
+  // If someone specified an unverified public mailbox (e.g. @gmail.com)
+  if (/@(gmail|yahoo|outlook|hotmail|icloud)\.com/i.test(configuredFrom)) {
+    console.warn(
+      `[Email] Configured EMAIL_FROM (${configuredFrom}) uses a public webmail domain that Resend will reject. Using '${prefix} <onboarding@resend.dev>' instead.`
+    );
+    return `${prefix} <onboarding@resend.dev>`;
+  }
+
+  return configuredFrom;
+}
+
+/**
+ * Helper to dispatch an email via Resend HTTPS API
+ */
+async function sendViaResend({ to, subject, html, fromPrefix = "YourTube" }) {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = getEmailSender(fromPrefix);
+
+  if (!apiKey) {
+    const errorMsg = "RESEND_API_KEY environment variable is not configured.";
+    console.error(`[Email] Cannot send email: ${errorMsg}`);
+    return { sent: false, error: errorMsg };
+  }
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html,
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      const errorDetail =
+        result?.message ||
+        result?.name ||
+        `Resend API error (HTTP ${response.status})`;
+      console.error(`[Email] Resend API rejected message: ${errorDetail}`);
+      return { sent: false, error: errorDetail };
+    }
+
+    console.log(`[Email] Email accepted by Resend. Email ID: ${result.id}`);
+    return { sent: true, messageId: result.id };
+  } catch (err) {
+    console.error(`[Email] HTTPS request to Resend failed:`, err.message);
+    return { sent: false, error: err.message };
+  }
+}
+
+/**
+ * Send Subscription Confirmation & Invoice Email via Resend HTTPS API.
+ * Completely replaces legacy SMTP to avoid port 25/465/587 connection timeouts on Render.
  */
 export async function sendSubscriptionConfirmationEmail({
   toEmail,
@@ -127,55 +194,23 @@ export async function sendSubscriptionConfirmationEmail({
 
       <div style="border-top:1px solid #e5e7eb;padding-top:16px;text-align:center;color:#9ca3af;font-size:12px;">
         <p>Need assistance? Contact support at support@yourtube.com</p>
-        <p>This is an automated receipt for YourTube test Razorpay payments.</p>
+        <p>This is an automated receipt for YourTube payments.</p>
       </div>
     </div>
   `;
 
-  const smtpHost = process.env.SMTP_HOST;
-  const smtpPort = process.env.SMTP_PORT;
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-
-  if (smtpHost && smtpUser && smtpPass) {
-    try {
-      const port = Number(smtpPort || 587);
-
-      const transporter = nodemailer.createTransport({
-        host: smtpHost,
-        port,
-        secure: port === 465,
-        auth: {
-          user: smtpUser,
-          pass: smtpPass,
-        },
-      });
-
-      const info = await transporter.sendMail({
-        from: process.env.EMAIL_FROM || `"YourTube" <${smtpUser}>`,
-        to: toEmail,
-        subject: emailSubject,
-        html: emailHtml,
-      });
-
-      console.log(
-        `[Email] Subscription confirmation sent. Message ID: ${info.messageId}`
-      );
-
-      return { sent: true, messageId: info.messageId };
-    } catch (err) {
-      console.error(
-        "[Email] Subscription confirmation failed:",
-        err.message
-      );
-
-      return { sent: false, error: err.message };
-    }
+  if (process.env.RESEND_API_KEY) {
+    return await sendViaResend({
+      to: toEmail,
+      subject: emailSubject,
+      html: emailHtml,
+      fromPrefix: "YourTube Billing",
+    });
   }
 
-  // Preserve the existing development/test behavior.
+  // Development/fallback logging if no RESEND_API_KEY is configured
   console.log(
-    `[Email Service - Test/Dev Mode] Simulated confirmation email for ${toEmail}`
+    `[Email Service - Dev Mode] Simulated confirmation email for ${toEmail}`
   );
   console.log(`Subject: ${emailSubject}`);
   console.log(
@@ -187,9 +222,7 @@ export async function sendSubscriptionConfirmationEmail({
 
 /**
  * Send Security Login OTP Email using Resend HTTPS API.
- * Required environment variables:
- * RESEND_API_KEY
- * EMAIL_FROM (a sender/domain verified in Resend)
+ * Keeps the existing function signature fully compatible with auth.js.
  */
 export async function sendLoginOtpEmail({
   toEmail,
@@ -202,18 +235,6 @@ export async function sendLoginOtpEmail({
   location = "Unknown Location",
   expiryMinutes = 10,
 }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.EMAIL_FROM;
-
-  if (!apiKey || !from) {
-    const error =
-      "Email service is not configured: RESEND_API_KEY or EMAIL_FROM is missing.";
-
-    console.error(`[Email] Cannot send login OTP: ${error}`);
-
-    return { sent: false, error };
-  }
-
   const emailSubject = `YourTube Security Verification Code: ${otpCode}`;
 
   const emailHtml = `
@@ -257,48 +278,28 @@ export async function sendLoginOtpEmail({
       </div>
 
       <div style="border-top:1px solid #e5e7eb;padding-top:14px;text-align:center;color:#9ca3af;font-size:11px;">
-        <p>If you did not initiate this sign-in attempt, change your password and review your account security.</p>
+        <p>If you did not initiate this sign-in attempt, review your account security immediately.</p>
         <p>This is an automated YourTube Security message.</p>
       </div>
     </div>
   `;
 
-  try {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from,
-        to: [toEmail],
-        subject: emailSubject,
-        html: emailHtml,
-      }),
+  if (process.env.RESEND_API_KEY) {
+    return await sendViaResend({
+      to: toEmail,
+      subject: emailSubject,
+      html: emailHtml,
+      fromPrefix: "YourTube Security",
     });
-
-    const result = await response.json();
-
-    if (!response.ok) {
-      const error =
-        result?.message ||
-        result?.name ||
-        `Resend API error (${response.status})`;
-
-      console.error(`[Email] Resend failed to send login OTP: ${error}`);
-
-      return { sent: false, error };
-    }
-
-    console.log(
-      `[Email] Login OTP accepted by Resend. Email ID: ${result.id}`
-    );
-
-    return { sent: true, messageId: result.id };
-  } catch (err) {
-    console.error("[Email] Resend request failed:", err.message);
-
-    return { sent: false, error: err.message };
   }
+
+  // Development mode fallback when running locally without RESEND_API_KEY
+  if (process.env.NODE_ENV === "development") {
+    console.log(`[Email Service - Dev Mode] Simulated Login OTP for ${toEmail}: ${otpCode}`);
+    return { sent: true, simulated: true };
+  }
+
+  const error = "Email service is not configured: RESEND_API_KEY is missing on server.";
+  console.error(`[Email] Cannot send login OTP: ${error}`);
+  return { sent: false, error };
 }

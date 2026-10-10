@@ -1,4 +1,10 @@
-import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  signOut,
+} from "firebase/auth";
 import { useState, createContext, useEffect, useContext, useRef } from "react";
 import { provider, auth } from "./firebase";
 import axiosInstance from "./axiosinstance";
@@ -22,9 +28,12 @@ export const UserProvider = ({ children }) => {
     }
   }, []);
 
-  const login = (userdata, themeData = null) => {
+  const login = (userdata, themeData = null, token = null) => {
     setUser(userdata);
     localStorage.setItem("user", JSON.stringify(userdata));
+    if (token) {
+      localStorage.setItem("token", token);
+    }
 
     if (themeData) {
       if (typeof window !== "undefined") {
@@ -38,6 +47,7 @@ export const UserProvider = ({ children }) => {
   const logout = async () => {
     setUser(null);
     localStorage.removeItem("user");
+    localStorage.removeItem("token");
     try {
       await signOut(auth);
     } catch (error) {
@@ -75,34 +85,95 @@ export const UserProvider = ({ children }) => {
       localStorage.setItem("yt_device_id", response.data.deviceIdentifier);
     }
 
-    login(response.data.result, response.data.theme);
+    login(response.data.result, response.data.theme, response.data.token);
     return { success: true, otpRequired: false, data: response.data };
   };
 
   const handlegooglesignin = async () => {
     interactiveLoginInProgress.current = true;
     try {
-      const result = await signInWithPopup(auth, provider);
-      const firebaseuser = result.user;
+      let firebaseuser = null;
+      try {
+        const result = await signInWithPopup(auth, provider);
+        firebaseuser = result.user;
+      } catch (popupError) {
+        if (popupError?.code === "auth/popup-blocked") {
+          console.warn("Popup blocked by browser. Falling back to redirect...");
+          await signInWithRedirect(auth, provider);
+          return { success: true, redirecting: true };
+        }
+        throw popupError;
+      }
+
+      if (!firebaseuser) {
+        return {
+          success: false,
+          message: "No user returned from Google sign-in.",
+        };
+      }
+
       autoLoginAttemptedUid.current = firebaseuser.uid;
+      const idToken = await firebaseuser.getIdToken(true);
       const payload = {
+        idToken,
         email: firebaseuser.email,
         name: firebaseuser.displayName,
         image: firebaseuser.photoURL || "https://github.com/shadcn.png",
       };
       return await executeBackendLogin(payload);
     } catch (error) {
+      console.error("Google sign-in error:", error);
+      if (error?.code === "auth/popup-closed-by-user") {
+        return {
+          success: false,
+          message: "Google sign-in was cancelled.",
+        };
+      }
+      if (error?.code === "auth/unauthorized-domain") {
+        return {
+          success: false,
+          message:
+            "Domain not authorized in Firebase Console. Please add this domain to Firebase Auth > Settings > Authorized domains.",
+        };
+      }
       return {
         success: false,
         message:
-          error?.code === "auth/popup-closed-by-user"
-            ? "Google sign-in was cancelled."
-            : "Google sign-in failed. Please try again.",
+          error?.response?.data?.message ||
+          error?.message ||
+          "Google sign-in failed. Please try again.",
       };
     } finally {
       interactiveLoginInProgress.current = false;
     }
   };
+
+  // Check for redirect result on page load (e.g. mobile or after signInWithRedirect)
+  useEffect(() => {
+    let isMounted = true;
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (result && result.user && isMounted) {
+          const firebaseuser = result.user;
+          autoLoginAttemptedUid.current = firebaseuser.uid;
+          const idToken = await firebaseuser.getIdToken(true);
+          const payload = {
+            idToken,
+            email: firebaseuser.email,
+            name: firebaseuser.displayName,
+            image: firebaseuser.photoURL || "https://github.com/shadcn.png",
+          };
+          await executeBackendLogin(payload);
+        }
+      })
+      .catch((err) => {
+        console.warn("Redirect sign-in check:", err?.message || err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const verifyLoginOtp = async ({ tempToken, otp, trustDevice = true, deviceName }) => {
     try {
@@ -117,7 +188,7 @@ export const UserProvider = ({ children }) => {
         if (res.data.deviceIdentifier) {
           localStorage.setItem("yt_device_id", res.data.deviceIdentifier);
         }
-        login(res.data.result, res.data.theme);
+        login(res.data.result, res.data.theme, res.data.token);
         setPendingOtp(null);
         return { success: true, message: res.data.message };
       }
@@ -144,7 +215,7 @@ export const UserProvider = ({ children }) => {
 
   useEffect(() => {
     const unsubcribe = onAuthStateChanged(auth, async (firebaseuser) => {
-      // Only auto-login if no active user and no active OTP challenge
+      // Only auto-login if no active user in localStorage and no active OTP challenge
       const savedUser = localStorage.getItem("user");
       if (
         firebaseuser &&
@@ -154,7 +225,9 @@ export const UserProvider = ({ children }) => {
       ) {
         autoLoginAttemptedUid.current = firebaseuser.uid;
         try {
+          const idToken = await firebaseuser.getIdToken();
           const payload = {
+            idToken,
             email: firebaseuser.email,
             name: firebaseuser.displayName,
             image: firebaseuser.photoURL || "https://github.com/shadcn.png",

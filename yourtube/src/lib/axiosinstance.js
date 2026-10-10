@@ -17,6 +17,7 @@ export const getVideoUrl = (filepath) => {
 
 const axiosInstance = axios.create({
   baseURL: getBackendUrl(),
+  withCredentials: true,
 });
 
 axiosInstance.interceptors.request.use((config) => {
@@ -28,11 +29,21 @@ axiosInstance.interceptors.request.use((config) => {
 
     try {
       const userStr = localStorage.getItem("user");
+      const token = localStorage.getItem("token");
+
+      if (token) {
+        config.headers["Authorization"] = `Bearer ${token}`;
+      } else if (userStr) {
+        const user = JSON.parse(userStr);
+        if (user?._id) {
+          config.headers["Authorization"] = `Bearer ${user._id}`;
+        }
+      }
+
       if (userStr) {
         const user = JSON.parse(userStr);
         if (user?._id) {
           config.headers["x-user-id"] = user._id;
-          config.headers["Authorization"] = `Bearer ${user._id}`;
         }
       }
     } catch {
